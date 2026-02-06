@@ -114,7 +114,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         finally:
             conn.close()
     else:
-        await update.message.reply_text(f"স্বাগতম {user.first_name}!")
+        await update.message.reply_text(f"স্বাগতম {user.first_name} এই বটে আপনি নিয়মিত নতুন লিংকের আপডেট পাবেন।")
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.effective_user.id != ADMIN_USER_ID: return ConversationHandler.END
@@ -249,4 +249,5 @@ def main():
     application.run_polling()
 
 if __name__ == '__main__':
+
     main()

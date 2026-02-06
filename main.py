@@ -3,7 +3,8 @@ import os
 import threading
 import asyncio
 import psycopg2
-from flask import Flask
+from flask import Flask, request
+from datetime import datetime
 
 # v20+ অনুযায়ী ইম্পোর্ট স্টেটমেন্ট
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, BotCommandScopeChat
@@ -33,8 +34,6 @@ def get_db_connection():
         url = DATABASE_URL
         if url.startswith("postgres://"):
             url = url.replace("postgres://", "postgresql://", 1)
-        
-        # পোলার কানেকশনের জন্য sslmode require থাকা জরুরি
         conn = psycopg2.connect(url, sslmode='require', connect_timeout=10)
         return conn
     except Exception as e:
@@ -48,25 +47,60 @@ ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", 0))
 # কথোপকথনের ধাপ (States)
 GET_TITLE, GET_CUSTOM_CODE, GET_BROADCAST_MSG = range(3)
 
+def init_db():
+    """প্রয়োজনীয় টেবিল এবং কলাম তৈরি বা আপডেট করে"""
+    conn = get_db_connection()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                # ইউজার টেবিলে জয়েন করার তারিখ কলাম যোগ করা
+                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+                # মিনি অ্যাপ ওপেন ট্র্যাকিং এর জন্য টেবিল তৈরি
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS app_logs (
+                        user_id BIGINT,
+                        open_date DATE DEFAULT CURRENT_DATE
+                    )
+                """)
+                conn.commit()
+        except Exception as e:
+            logger.error(f"DB Init Error: {e}")
+        finally:
+            conn.close()
+
 def save_user(user_id, username):
-    """ইউজার আইডি এবং ইউজারনেম ডাটাবেসে সেভ করে"""
+    """ইউজার আইডি সেভ করে এবং জয়েনিং টাইম ট্র্যাক করে"""
     conn = get_db_connection()
     if conn:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO users (user_id, username) VALUES (%s, %s) "
+                    "INSERT INTO users (user_id, username, joined_at) VALUES (%s, %s, CURRENT_TIMESTAMP) "
                     "ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username",
                     (user_id, username)
                 )
                 conn.commit()
         except Exception as e:
-            logger.error(f"Error saving user to DB: {e}")
+            logger.error(f"Error saving user: {e}")
+        finally:
+            conn.close()
+
+def track_app_open(user_id):
+    """মিনি অ্যাপ ওপেন হওয়ার লগ ডাটাবেসে জমা করে"""
+    conn = get_db_connection()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO app_logs (user_id) VALUES (%s)", (user_id,))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Error tracking app open: {e}")
         finally:
             conn.close()
 
 async def post_init(application: Application):
     """বট মেনু কমান্ড সেটআপ"""
+    init_db() # ডাটাবেস চেক এবং টেবিল আপডেট
     user_commands = [BotCommand("start", "বট শুরু করুন")]
     await application.bot.set_my_commands(user_commands)
     
@@ -75,13 +109,11 @@ async def post_init(application: Application):
             BotCommand("start", "বট শুরু করুন"),
             BotCommand("alllink", "সব ফাইলের তালিকা"),
             BotCommand("broadcast", "সবাইকে মেসেজ পাঠান"),
+            BotCommand("statics", "বটের পরিসংখ্যান"),
             BotCommand("cancel", "বর্তমান কাজ বাতিল")
         ]
         try:
-            await application.bot.set_my_commands(
-                admin_commands, 
-                scope=BotCommandScopeChat(chat_id=ADMIN_USER_ID)
-            )
+            await application.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_USER_ID))
         except Exception as e:
             logger.error(f"Failed to set admin commands: {e}")
 
@@ -94,9 +126,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.args:
         file_code = context.args[0]
         conn = get_db_connection()
-        if not conn:
-            await update.message.reply_text("ডেটাবেস কানেকশন এরর!")
-            return
+        if not conn: return
         try:
             with conn.cursor() as cur:
                 cur.execute("SELECT file_type, file_id, title FROM files WHERE custom_code = %s", (file_code,))
@@ -109,16 +139,55 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 elif f_type == 'document': await context.bot.send_document(chat_id=user.id, document=f_id, protect_content=True)
                 elif f_type == 'audio': await context.bot.send_audio(chat_id=user.id, audio=f_id, protect_content=True)
                 elif f_type == 'photo': await context.bot.send_photo(chat_id=user.id, photo=f_id, protect_content=True)
-            else:
-                await update.message.reply_text("দুঃখিত, এই লিঙ্কটি সঠিক নয়।")
         finally:
             conn.close()
     else:
         await update.message.reply_text(f"স্বাগতম {user.first_name} এই বটে আপনি নিয়মিত নতুন লিংকের আপডেট পাবেন।")
 
+async def statics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """বটের বিস্তারিত পরিসংখ্যান দেখায়"""
+    if update.effective_user.id != ADMIN_USER_ID: return
+    
+    conn = get_db_connection()
+    if not conn:
+        await update.message.reply_text("ডেটাবেস এরর!")
+        return
+        
+    try:
+        with conn.cursor() as cur:
+            # মোট ইউজার (লাইফ টাইম)
+            cur.execute("SELECT COUNT(*) FROM users")
+            total_users = cur.fetchone()[0]
+            
+            # আজকের নতুন ইউজার
+            cur.execute("SELECT COUNT(*) FROM users WHERE joined_at >= CURRENT_DATE")
+            today_users = cur.fetchone()[0]
+            
+            # মোট অ্যাপ ওপেন (লাইফ টাইম)
+            cur.execute("SELECT COUNT(*) FROM app_logs")
+            total_app_opens = cur.fetchone()[0]
+            
+            # আজকের অ্যাপ ওপেন
+            cur.execute("SELECT COUNT(*) FROM app_logs WHERE open_date = CURRENT_DATE")
+            today_app_opens = cur.fetchone()[0]
+            
+        stats_msg = (
+            "📊 **বট পরিসংখ্যান**\n\n"
+            f"👥 **ইউজার পরিসংখ্যান:**\n"
+            f"  • আজকে নতুন: {today_users}\n"
+            f"  • মোট ইউজার: {total_users}\n\n"
+            f"📱 **মিনি অ্যাপ পরিসংখ্যান:**\n"
+            f"  • আজকে ওপেন: {today_app_opens}\n"
+            f"  • মোট ওপেন: {total_app_opens}\n\n"
+            f"📅 তারিখ: {datetime.now().strftime('%d %B, %Y')}"
+        )
+        await update.message.reply_text(stats_msg, parse_mode='Markdown')
+    finally:
+        conn.close()
+
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.effective_user.id != ADMIN_USER_ID: return ConversationHandler.END
-    await update.message.reply_text("ব্রডকাস্ট মেসেজটি দিন। বাতিল করতে /cancel লিখুন।")
+    await update.message.reply_text("ব্রডকাস্ট মেসেজটি দিন।")
     return GET_BROADCAST_MSG
 
 async def send_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -129,18 +198,11 @@ async def send_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         with conn.cursor() as cur:
             cur.execute("SELECT user_id FROM users")
             users = cur.fetchall()
-        
-        await update.message.reply_text(f"ব্রডকাস্টিং শুরু... ইউজার সংখ্যা: {len(users)}")
-        success = 0
         for (u_id,) in users:
-            try:
-                await context.bot.copy_message(chat_id=u_id, from_chat_id=admin_msg.chat_id, message_id=admin_msg.message_id, protect_content=True)
-                success += 1
-                await asyncio.sleep(0.05)
+            try: await context.bot.copy_message(chat_id=u_id, from_chat_id=admin_msg.chat_id, message_id=admin_msg.message_id, protect_content=True)
             except: continue
-        await update.message.reply_text(f"ব্রডকাস্ট সম্পন্ন। সফল: {success} জন।")
-    finally:
-        conn.close()
+        await update.message.reply_text("ব্রডকাস্ট সম্পন্ন।")
+    finally: conn.close()
     return ConversationHandler.END
 
 async def all_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -154,10 +216,7 @@ async def all_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if results:
             keyboard = [[InlineKeyboardButton(t or c, callback_data=c)] for c, t in results]
             await update.message.reply_text('ফাইলের তালিকা:', reply_markup=InlineKeyboardMarkup(keyboard))
-        else:
-            await update.message.reply_text("কোনো ফাইল সেভ করা নেই।")
-    finally:
-        conn.close()
+    finally: conn.close()
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -173,24 +232,19 @@ async def handle_media_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif msg.document: f_id, f_type = msg.document.file_id, 'document'
     elif msg.audio: f_id, f_type = msg.audio.file_id, 'audio'
     elif msg.photo: f_id, f_type = msg.photo[-1].file_id, 'photo'
-    
     if f_id:
         context.user_data['tmp_file'] = {'id': f_id, 'type': f_type}
-        await msg.reply_text("ফাইল পাওয়া গেছে। এখন একটি শিরোনাম (Title) দিন।")
+        await msg.reply_text("শিরোনাম (Title) দিন।")
         return GET_TITLE
     return ConversationHandler.END
 
 async def get_title(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data['tmp_title'] = update.message.text.strip()
-    await update.message.reply_text("শিরোনাম সেট হয়েছে। এখন একটি ইউনিক কোড দিন (স্পেস ছাড়া)।")
+    await update.message.reply_text("ইউনিক কোড দিন।")
     return GET_CUSTOM_CODE
 
 async def get_custom_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     code = update.message.text.strip()
-    if ' ' in code:
-        await update.message.reply_text("স্পেস ছাড়া কোড দিন।")
-        return GET_CUSTOM_CODE
-        
     conn = get_db_connection()
     if not conn: return ConversationHandler.END
     try:
@@ -200,25 +254,26 @@ async def get_custom_code(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             cur.execute("INSERT INTO files (custom_code, title, file_type, file_id) VALUES (%s, %s, %s, %s)", (code, t, f['type'], f['id']))
             conn.commit()
             bot_info = await context.bot.get_me()
-            await update.message.reply_text(f"সফল! লিঙ্ক তৈরি হয়েছে:\n`https://t.me/{bot_info.username}?start={code}`", parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"DB Save Error: {e}")
-        await update.message.reply_text("সম্ভবত কোডটি ইতিমধ্যে ব্যবহৃত।")
-    finally:
-        conn.close()
+            await update.message.reply_text(f"সফল! লিঙ্ক:\n`https://t.me/{bot_info.username}?start={code}`", parse_mode='Markdown')
+    finally: conn.close()
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("প্রক্রিয়াটি বাতিল করা হয়েছে।")
+    await update.message.reply_text("বাতিল করা হয়েছে।")
     return ConversationHandler.END
 
-# --- Flask Server (Koyeb এর জন্য পোর্ট ডাইনামিক করা হয়েছে) ---
+# --- Flask Server ---
 app = Flask('')
 @app.route('/')
 def home(): return "Bot is Online"
 
+@app.route('/webapp-open/<int:user_id>')
+def webapp_open(user_id):
+    """এই লিঙ্কে হিট করলে মিনি অ্যাপ ওপেন কাউন্ট হবে"""
+    track_app_open(user_id)
+    return {"status": "success", "user_id": user_id}
+
 def run_flask():
-    # Koyeb অটোমেটিক PORT এনভায়রনমেন্ট ভেরিয়েবল প্রদান করে
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
@@ -228,10 +283,7 @@ def main():
     
     application.add_handler(ConversationHandler(
         entry_points=[MessageHandler(filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.PHOTO, handle_media_upload)],
-        states={
-            GET_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_title)],
-            GET_CUSTOM_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_custom_code)]
-        },
+        states={GET_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_title)], GET_CUSTOM_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_custom_code)]},
         fallbacks=[CommandHandler("cancel", cancel)],
     ))
     
@@ -243,11 +295,10 @@ def main():
     
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("alllink", all_links))
+    application.add_handler(CommandHandler("statics", statics_command))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     
-    logger.info("Starting Polling for Koyeb...")
     application.run_polling()
 
 if __name__ == '__main__':
-
     main()

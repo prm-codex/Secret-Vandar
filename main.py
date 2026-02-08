@@ -53,6 +53,7 @@ def init_db():
     if conn:
         try:
             with conn.cursor() as cur:
+                # ইউজার টেবিল
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS users (
                         user_id BIGINT PRIMARY KEY,
@@ -64,6 +65,7 @@ def init_db():
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT")
                 
+                # অ্যাপ লগ টেবিল
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS app_logs (
                         user_id BIGINT,
@@ -72,7 +74,7 @@ def init_db():
                 """)
                 cur.execute("ALTER TABLE app_logs ADD COLUMN IF NOT EXISTS last_open TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
                 
-                # ফাইল টেবিল চেক (মাল্টিপল ফাইল সাপোর্ট করার জন্য id ও type কলামের লেন্থ বেশি হতে পারে)
+                # ফাইল টেবিল
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS files (
                         custom_code TEXT PRIMARY KEY,
@@ -104,7 +106,7 @@ def save_user(user_id, username, full_name):
         finally: conn.close()
 
 def track_app_open(user_id):
-    """মিনি অ্যাপ ওপেন ট্র্যাকিং"""
+    """মিনি অ্যাপ ওপেন ট্র্যাকিং (২৪ ঘণ্টা লজিক)"""
     conn = get_db_connection()
     if conn:
         try:
@@ -127,7 +129,7 @@ async def post_init(application: Application):
         admin_commands = [
             BotCommand("start", "বট শুরু করুন"),
             BotCommand("alllink", "সব ফাইলের তালিকা"),
-            BotCommand("broadcast", "সবাইকে মেসেজ পাঠান"),
+            BotCommand("broadcast", "সবাইকে মেসেজ/মিডিয়া পাঠান"),
             BotCommand("statics", "বটের পরিসংখ্যান"),
             BotCommand("cancel", "বর্তমান কাজ বাতিল")
         ]
@@ -151,10 +153,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 res = cur.fetchone()
             if res:
                 f_types, f_ids, title = res
-                # শিরোনাম পাঠানো
                 await context.bot.send_message(chat_id=user.id, text=f"*{title}*", parse_mode='Markdown')
                 
-                # মাল্টিপল কন্টেন্ট প্রসেসিং (Delimiter: '|')
                 ids_list = f_ids.split('|')
                 types_list = f_types.split('|')
                 
@@ -165,11 +165,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         elif ftype == 'document': await context.bot.send_document(chat_id=user.id, document=fid, protect_content=True)
                         elif ftype == 'audio': await context.bot.send_audio(chat_id=user.id, audio=fid, protect_content=True)
                         elif ftype == 'photo': await context.bot.send_photo(chat_id=user.id, photo=fid, protect_content=True)
-                        await asyncio.sleep(0.3) # অল্প গ্যাপ যাতে ফ্লাড না হয়
+                        await asyncio.sleep(0.3)
                     except: continue
         finally: conn.close()
     else:
-        await update.message.reply_text(f"স্বাগতম {user.first_name} এই বটে আপনি নিয়মিত নতুন লিংকের আপডেট পাবেন। বটের সাথেই থাকুন এবং সকল সেলিব্রিটির লিংক এবং ভাইরাল ভিডিও গুলো ইনজয় করুন।")
+        await update.message.reply_text(f"স্বাগতম {user.first_name} 😎 এই বটে আপনি নিয়মিত নতুন লিংকের আপডেট পাবেন। বটের সাথেই থাকুন এবং সকল সেলিব্রিটির লিংক এবং ভাইরাল ভিডিও গুলো ইনজয় করুন।")
 
 async def statics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ADMIN_USER_ID: return
@@ -189,29 +189,46 @@ async def statics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             stats_msg = (
                 "📊 **বট পরিসংখ্যান**\n\n"
                 f"👥 **ইউজার:** আজকে: {today_users} | মোট: {total_users}\n"
-                f"📱 **অ্যাপ ওপেন (ইউনিক):** গত ২৪ঘণ্টা: {today_app_opens} | মোট: {total_app_opens}\n"
+                f"📱 **অ্যাপ ওপেন:** গত ২৪ঘণ্টা: {today_app_opens} | মোট: {total_app_opens}\n"
                 f"📅 তারিখ: {datetime.now().strftime('%d %B, %Y')}"
             )
             await update.message.reply_text(stats_msg, parse_mode='Markdown')
     finally: conn.close()
 
+# --- ব্রডকাস্ট লজিক (মিডিয়া সাপোর্টসহ) ---
+
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.effective_user.id != ADMIN_USER_ID: return ConversationHandler.END
-    await update.message.reply_text("ব্রডকাস্ট মেসেজটি দিন।")
+    await update.message.reply_text("📢 ব্রডকাস্ট করার জন্য মেসেজ, ছবি বা ভিডিও পাঠান। বাতিল করতে /cancel লিখুন।")
     return GET_BROADCAST_MSG
 
 async def send_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     admin_msg = update.message
     conn = get_db_connection()
     if not conn: return ConversationHandler.END
+    
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT user_id FROM users")
             users = cur.fetchall()
+        
+        progress_msg = await update.message.reply_text(f"🚀 ব্রডকাস্টিং শুরু হয়েছে... মোট ইউজার: {len(users)}")
+        success = 0
+        
         for (u_id,) in users:
-            try: await context.bot.copy_message(chat_id=u_id, from_chat_id=admin_msg.chat_id, message_id=admin_msg.message_id, protect_content=True)
+            try:
+                # copy_message সব ধরনের মিডিয়া এবং ক্যাপশন কপি করে পাঠিয়ে দেয়
+                await context.bot.copy_message(
+                    chat_id=u_id, 
+                    from_chat_id=admin_msg.chat_id, 
+                    message_id=admin_msg.message_id, 
+                    protect_content=True
+                )
+                success += 1
+                await asyncio.sleep(0.05) # ফ্লাড কন্ট্রোল
             except: continue
-        await update.message.reply_text("✅ ব্রডকাস্ট সম্পন্ন।")
+            
+        await progress_msg.edit_text(f"✅ ব্রডকাস্ট সম্পন্ন!\nসফলভাবে পাঠানো হয়েছে: {success} জন ইউজারকে।")
     finally: conn.close()
     return ConversationHandler.END
 
@@ -234,16 +251,14 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     bot_info = await context.bot.get_me()
     await query.message.reply_text(f"লিঙ্ক: `https://t.me/{bot_info.username}?start={query.data}`", parse_mode='Markdown')
 
-# --- মাল্টিপল ফাইল হ্যান্ডলিং লজিক ---
+# --- মাল্টিপল ফাইল কালেকশন ---
 
 async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """প্রথম ফাইল গ্রহণ করে এবং লিস্ট শুরু করে"""
     if update.effective_user.id != ADMIN_USER_ID: return ConversationHandler.END
     context.user_data['multi_files'] = []
     return await add_to_media_list(update, context)
 
 async def add_to_media_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """ফাইলগুলো লিস্টে যোগ করে"""
     msg = update.message
     f_id, f_type = None, None
     
@@ -257,18 +272,14 @@ async def add_to_media_list(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         context.user_data['multi_files'].append({'id': f_id, 'type': f_type})
         count = len(context.user_data['multi_files'])
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Done ✅", callback_data="done_media")]])
-        await msg.reply_text(f"ফাইল {count} যোগ হয়েছে। আরও পাঠাতে পারেন। শেষ হলে নিচের বাটনে ক্লিক করুন।", reply_markup=keyboard)
+        await msg.reply_text(f"কন্টেন্ট {count} যোগ হয়েছে। আরও কন্টেন্ট পাঠান অথবা 'Done' এ ক্লিক করুন।", reply_markup=keyboard)
         return GET_MEDIA
     return GET_MEDIA
 
 async def media_done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """মিডিয়া কালেকশন শেষ"""
     query = update.callback_query
     await query.answer()
-    if not context.user_data.get('multi_files'):
-        await query.message.reply_text("কোনো ফাইল পাওয়া যায়নি। আবার চেষ্টা করুন।")
-        return ConversationHandler.END
-    await query.message.reply_text("সব ফাইল পাওয়া গেছে। এখন একটি শিরোনাম (Title) দিন।")
+    await query.message.reply_text("সব কন্টেন্ট পাওয়া গেছে। এখন একটি শিরোনাম (Title) দিন।")
     return GET_TITLE
 
 async def get_title(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -284,19 +295,13 @@ async def get_custom_code(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         with conn.cursor() as cur:
             files = context.user_data.get('multi_files')
             t = context.user_data.get('tmp_title')
-            
-            # ডেটাবেসে রাখার জন্য জয়েন করা হচ্ছে
             f_ids = "|".join([f['id'] for f in files])
             f_types = "|".join([f['type'] for f in files])
-            
-            cur.execute("INSERT INTO files (custom_code, title, file_type, file_id) VALUES (%s, %s, %s, %s)", 
-                        (code, t, f_types, f_ids))
+            cur.execute("INSERT INTO files (custom_code, title, file_type, file_id) VALUES (%s, %s, %s, %s)", (code, t, f_types, f_ids))
             conn.commit()
             bot_info = await context.bot.get_me()
-            await update.message.reply_text(f"✅ সফল! {len(files)} টি ফাইলসহ লিঙ্ক তৈরি হয়েছে:\n`https://t.me/{bot_info.username}?start={code}`", parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Save Error: {e}")
-        await update.message.reply_text("কোডটি ইতিমধ্যে ব্যবহৃত বা সমস্যা হয়েছে।")
+            await update.message.reply_text(f"✅ সফল! {len(files)} টি কন্টেন্টসহ লিঙ্ক তৈরি হয়েছে:\n`https://t.me/{bot_info.username}?start={code}`", parse_mode='Markdown')
+    except: await update.message.reply_text("সমস্যা হয়েছে। কোডটি হয়তো আগে ব্যবহৃত।")
     finally: conn.close()
     return ConversationHandler.END
 
@@ -335,10 +340,12 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel)],
     ))
     
-    # ব্রডকাস্ট
+    # ব্রডকাস্ট (টেক্সট ও মিডিয়া সাপোর্টসহ)
     application.add_handler(ConversationHandler(
         entry_points=[CommandHandler("broadcast", broadcast_command)],
-        states={GET_BROADCAST_MSG: [MessageHandler(filters.ALL & ~filters.COMMAND, send_broadcast)]},
+        states={
+            GET_BROADCAST_MSG: [MessageHandler(filters.ALL & ~filters.COMMAND, send_broadcast)]
+        },
         fallbacks=[CommandHandler("cancel", cancel)],
     ))
     
@@ -351,4 +358,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

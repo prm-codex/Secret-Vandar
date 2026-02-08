@@ -48,12 +48,11 @@ ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", 0))
 GET_TITLE, GET_CUSTOM_CODE, GET_BROADCAST_MSG = range(3)
 
 def init_db():
-    """প্রয়োজনীয় টেবিল এবং কলাম তৈরি বা অটো-আপডেট করে (স্কিমা ফিক্সসহ)"""
+    """প্রয়োজনীয় টেবিল এবং কলাম তৈরি বা অটো-আপডেট করে"""
     conn = get_db_connection()
     if conn:
         try:
             with conn.cursor() as cur:
-                # ১. users টেবিল নিশ্চিত করা
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS users (
                         user_id BIGINT PRIMARY KEY,
@@ -65,14 +64,12 @@ def init_db():
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT")
                 
-                # ২. app_logs টেবিল নিশ্চিত করা
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS app_logs (
                         user_id BIGINT,
                         last_open TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
-                # ৩. কলামটি না থাকলে নিশ্চিতভাবে যোগ করা (Fix for column not exist error)
                 cur.execute("ALTER TABLE app_logs ADD COLUMN IF NOT EXISTS last_open TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
                 
                 conn.commit()
@@ -128,7 +125,7 @@ def track_app_open(user_id):
 
 async def post_init(application: Application):
     """বট মেনু কমান্ড সেটআপ"""
-    init_db() # ডাটাবেস স্কিমা ফিক্স করবে
+    init_db()
     user_commands = [BotCommand("start", "বট শুরু করুন")]
     await application.bot.set_my_commands(user_commands)
     
@@ -161,11 +158,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 res = cur.fetchone()
             if res:
                 f_type, f_id, title = res
+                # শিরোনাম পাঠানো
                 await context.bot.send_message(chat_id=user.id, text=f"*{title}*", parse_mode='Markdown')
-                if f_type == 'video': await context.bot.send_video(chat_id=user.id, video=f_id, protect_content=True)
-                elif f_type == 'document': await context.bot.send_document(chat_id=user.id, document=f_id, protect_content=True)
-                elif f_type == 'audio': await context.bot.send_audio(chat_id=user.id, audio=f_id, protect_content=True)
-                elif f_type == 'photo': await context.bot.send_photo(chat_id=user.id, photo=f_id, protect_content=True)
+                
+                # কন্টেন্ট পাঠানো (টেক্সট বা মিডিয়া)
+                if f_type == 'text':
+                    await context.bot.send_message(chat_id=user.id, text=f_id, protect_content=True)
+                elif f_type == 'video': 
+                    await context.bot.send_video(chat_id=user.id, video=f_id, protect_content=True)
+                elif f_type == 'document': 
+                    await context.bot.send_document(chat_id=user.id, document=f_id, protect_content=True)
+                elif f_type == 'audio': 
+                    await context.bot.send_audio(chat_id=user.id, audio=f_id, protect_content=True)
+                elif f_type == 'photo': 
+                    await context.bot.send_photo(chat_id=user.id, photo=f_id, protect_content=True)
         finally:
             conn.close()
     else:
@@ -182,19 +188,12 @@ async def statics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         
     try:
         with conn.cursor() as cur:
-            # মোট ইউজার
             cur.execute("SELECT COUNT(*) FROM users")
             total_users = cur.fetchone()[0]
-            
-            # আজকের নতুন ইউজার
             cur.execute("SELECT COUNT(*) FROM users WHERE joined_at >= CURRENT_DATE")
             today_users = cur.fetchone()[0]
-            
-            # মোট অ্যাপ ওপেন
             cur.execute("SELECT COUNT(*) FROM app_logs")
             total_app_opens = cur.fetchone()[0]
-            
-            # গত ২৪ ঘণ্টায় ইউনিক অ্যাপ ওপেন
             cur.execute("SELECT COUNT(*) FROM app_logs WHERE last_open >= (NOW() - INTERVAL '24 HOURS')")
             today_app_opens = cur.fetchone()[0]
             
@@ -210,8 +209,8 @@ async def statics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
             await update.message.reply_text(stats_msg, parse_mode='Markdown')
     except Exception as e:
-        logger.error(f"Statics Command Error: {e}")
-        await update.message.reply_text(f"❌ ডাটাবেস কুয়েরিতে সমস্যা হয়েছে। দয়া করে বট রিস্টার্ট দিন যাতে টেবিল আপডেট হতে পারে।")
+        logger.error(f"Statics Error: {e}")
+        await update.message.reply_text("❌ পরিসংখ্যান আনতে সমস্যা হয়েছে।")
     finally:
         conn.close()
 
@@ -254,14 +253,20 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     bot_info = await context.bot.get_me()
     await query.message.reply_text(f"লিঙ্ক:\n`https://t.me/{bot_info.username}?start={query.data}`", parse_mode='Markdown')
 
-async def handle_media_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """অ্যাডমিন থেকে মিডিয়া বা টেক্সট গ্রহণ করে"""
     if update.effective_user.id != ADMIN_USER_ID: return ConversationHandler.END
     msg = update.message
     f_id, f_type = None, None
+    
+    # মিডিয়া চেক
     if msg.video: f_id, f_type = msg.video.file_id, 'video'
     elif msg.document: f_id, f_type = msg.document.file_id, 'document'
     elif msg.audio: f_id, f_type = msg.audio.file_id, 'audio'
     elif msg.photo: f_id, f_type = msg.photo[-1].file_id, 'photo'
+    # টেক্সট বা লিঙ্ক চেক
+    elif msg.text: f_id, f_type = msg.text, 'text'
+    
     if f_id:
         context.user_data['tmp_file'] = {'id': f_id, 'type': f_type}
         await msg.reply_text("✍️ শিরোনাম (Title) দিন।")
@@ -299,7 +304,6 @@ def home(): return "Bot is Online"
 
 @app.route('/webapp-open/<int:user_id>')
 def webapp_open(user_id):
-    """২৪ ঘণ্টা পর পর মিনি অ্যাপ ওপেন কাউন্ট হবে"""
     track_app_open(user_id)
     return {"status": "success", "user_id": user_id}
 
@@ -311,12 +315,17 @@ def main():
     threading.Thread(target=run_flask).start()
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     
+    # লিঙ্ক জেনারেটর কনভারসেশন (মিডিয়া + টেক্সট)
     application.add_handler(ConversationHandler(
-        entry_points=[MessageHandler(filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.PHOTO, handle_media_upload)],
-        states={GET_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_title)], GET_CUSTOM_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_custom_code)]},
+        entry_points=[MessageHandler(filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.PHOTO | (filters.TEXT & ~filters.COMMAND), handle_admin_input)],
+        states={
+            GET_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_title)],
+            GET_CUSTOM_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_custom_code)]
+        },
         fallbacks=[CommandHandler("cancel", cancel)],
     ))
     
+    # ব্রডকাস্ট কনভারসেশন
     application.add_handler(ConversationHandler(
         entry_points=[CommandHandler("broadcast", broadcast_command)],
         states={GET_BROADCAST_MSG: [MessageHandler(filters.ALL & ~filters.COMMAND, send_broadcast)]},

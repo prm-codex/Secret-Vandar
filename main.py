@@ -175,7 +175,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         finally:
             conn.close()
     else:
-        await update.message.reply_text(f"স্বাগতম {user.first_name}!")
+        await update.message.reply_text(f"স্বাগতম {user.first_name} এই বটে আপনি নিয়মিত নতুন লিংকের আপডেট পাবেন। বটের সাথেই থাকুন এবং সকল সেলিব্রিটির লিংক এবং ভাইরাল ভিডিও গুলো ইনজয় করুন।")
 
 async def statics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """বটের বিস্তারিত পরিসংখ্যান দেখায়"""
@@ -341,3 +341,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

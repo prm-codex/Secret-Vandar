@@ -4,7 +4,7 @@ import threading
 import asyncio
 import psycopg2
 from flask import Flask, request
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # v20+ অনুযায়ী ইম্পোর্ট স্টেটমেন্ট
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, BotCommandScopeChat
@@ -55,11 +55,12 @@ def init_db():
             with conn.cursor() as cur:
                 # ইউজার টেবিলে জয়েন করার তারিখ কলাম যোগ করা
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-                # মিনি অ্যাপ ওপেন ট্র্যাকিং এর জন্য টেবিল তৈরি
+                
+                # মিনি অ্যাপ ওপেন ট্র্যাকিং এর জন্য টেবিল তৈরি (TIMESTAMP ব্যবহার করে)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS app_logs (
                         user_id BIGINT,
-                        open_date DATE DEFAULT CURRENT_DATE
+                        last_open TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
                 conn.commit()
@@ -86,13 +87,34 @@ def save_user(user_id, username):
             conn.close()
 
 def track_app_open(user_id):
-    """মিনি অ্যাপ ওপেন হওয়ার লগ ডাটাবেসে জমা করে"""
+    """মিনি অ্যাপ ওপেন হওয়ার লগ ডাটাবেসে জমা করে (২৪ ঘণ্টা পর পর কাউন্ট হবে)"""
     conn = get_db_connection()
     if conn:
         try:
             with conn.cursor() as cur:
-                cur.execute("INSERT INTO app_logs (user_id) VALUES (%s)", (user_id,))
-                conn.commit()
+                # ইউজারের শেষ ওপেন করার সময় চেক করা
+                cur.execute("SELECT MAX(last_open) FROM app_logs WHERE user_id = %s", (user_id,))
+                res = cur.fetchone()
+                
+                now = datetime.now()
+                should_insert = False
+                
+                if res[0] is None:
+                    # যদি এই ইউজার আগে কখনো ওপেন না করে থাকে
+                    should_insert = True
+                else:
+                    last_open_time = res[0]
+                    # যদি শেষ ওপেন করার সময় থেকে এখন পর্যন্ত ২৪ ঘণ্টা বা তার বেশি সময় পার হয়
+                    if now - last_open_time >= timedelta(hours=24):
+                        should_insert = True
+                
+                if should_insert:
+                    cur.execute("INSERT INTO app_logs (user_id, last_open) VALUES (%s, %s)", (user_id, now))
+                    conn.commit()
+                    logger.info(f"App open counted for user {user_id}")
+                else:
+                    logger.info(f"App open ignored for user {user_id} (within 24h)")
+                    
         except Exception as e:
             logger.error(f"Error tracking app open: {e}")
         finally:
@@ -134,7 +156,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if res:
                 f_type, f_id, title = res
                 await context.bot.send_message(chat_id=user.id, text=f"*{title}*", parse_mode='Markdown')
-                # protect_content=True যাতে ডাউনলোড/ফরওয়ার্ড বন্ধ থাকে
                 if f_type == 'video': await context.bot.send_video(chat_id=user.id, video=f_id, protect_content=True)
                 elif f_type == 'document': await context.bot.send_document(chat_id=user.id, document=f_id, protect_content=True)
                 elif f_type == 'audio': await context.bot.send_audio(chat_id=user.id, audio=f_id, protect_content=True)
@@ -142,7 +163,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         finally:
             conn.close()
     else:
-        await update.message.reply_text(f"স্বাগতম {user.first_name} এই বটে আপনি নিয়মিত নতুন লিংকের আপডেট পাবেন।")
+        await update.message.reply_text(f"স্বাগতম {user.first_name}!")
 
 async def statics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """বটের বিস্তারিত পরিসংখ্যান দেখায়"""
@@ -167,8 +188,8 @@ async def statics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             cur.execute("SELECT COUNT(*) FROM app_logs")
             total_app_opens = cur.fetchone()[0]
             
-            # আজকের অ্যাপ ওপেন
-            cur.execute("SELECT COUNT(*) FROM app_logs WHERE open_date = CURRENT_DATE")
+            # আজকের অ্যাপ ওপেন (শেষ ২৪ ঘণ্টায় যারা প্রথমবার ঢুকেছে)
+            cur.execute("SELECT COUNT(*) FROM app_logs WHERE last_open >= (NOW() - INTERVAL '24 HOURS')")
             today_app_opens = cur.fetchone()[0]
             
         stats_msg = (
@@ -176,9 +197,9 @@ async def statics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"👥 **ইউজার পরিসংখ্যান:**\n"
             f"  • আজকে নতুন: {today_users}\n"
             f"  • মোট ইউজার: {total_users}\n\n"
-            f"📱 **মিনি অ্যাপ পরিসংখ্যান:**\n"
-            f"  • আজকে ওপেন: {today_app_opens}\n"
-            f"  • মোট ওপেন: {total_app_opens}\n\n"
+            f"📱 **মিনি অ্যাপ পরিসংখ্যান (ইউনিক):**\n"
+            f"  • গত ২৪ ঘণ্টায়: {today_app_opens}\n"
+            f"  • মোট ওপেন (লাইফটাইম): {total_app_opens}\n\n"
             f"📅 তারিখ: {datetime.now().strftime('%d %B, %Y')}"
         )
         await update.message.reply_text(stats_msg, parse_mode='Markdown')
@@ -269,7 +290,7 @@ def home(): return "Bot is Online"
 
 @app.route('/webapp-open/<int:user_id>')
 def webapp_open(user_id):
-    """এই লিঙ্কে হিট করলে মিনি অ্যাপ ওপেন কাউন্ট হবে"""
+    """এই লিঙ্কে হিট করলে ২৪ ঘণ্টা পর পর মিনি অ্যাপ ওপেন কাউন্ট হবে"""
     track_app_open(user_id)
     return {"status": "success", "user_id": user_id}
 

@@ -48,15 +48,16 @@ ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", 0))
 GET_TITLE, GET_CUSTOM_CODE, GET_BROADCAST_MSG = range(3)
 
 def init_db():
-    """প্রয়োজনীয় টেবিল এবং কলাম তৈরি বা আপডেট করে"""
+    """প্রয়োজনীয় টেবিল এবং কলাম তৈরি বা অটো-আপডেট করে"""
     conn = get_db_connection()
     if conn:
         try:
             with conn.cursor() as cur:
-                # ইউজার টেবিলে জয়েন করার তারিখ কলাম যোগ করা
+                # ইউজার টেবিলে joined_at এবং full_name কলাম না থাকলে অটোমেটিক অ্যাড করবে
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT")
                 
-                # মিনি অ্যাপ ওপেন ট্র্যাকিং এর জন্য টেবিল তৈরি (TIMESTAMP ব্যবহার করে)
+                # মিনি অ্যাপ ওপেন ট্র্যাকিং এর জন্য টেবিল তৈরি (যদি না থাকে)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS app_logs (
                         user_id BIGINT,
@@ -64,21 +65,23 @@ def init_db():
                     )
                 """)
                 conn.commit()
+                logger.info("Database initialized successfully.")
         except Exception as e:
             logger.error(f"DB Init Error: {e}")
         finally:
             conn.close()
 
-def save_user(user_id, username):
-    """ইউজার আইডি সেভ করে এবং জয়েনিং টাইম ট্র্যাক করে"""
+def save_user(user_id, username, full_name):
+    """ইউজার আইডি, ইউজারনেম এবং টেলিগ্রাম নাম ডাটাবেসে সেভ করে"""
     conn = get_db_connection()
     if conn:
         try:
             with conn.cursor() as cur:
+                # ইউজার আইডি ইউনিক হিসেবে সেভ হবে এবং ইউজারনেম ও নাম আপডেট হবে
                 cur.execute(
-                    "INSERT INTO users (user_id, username, joined_at) VALUES (%s, %s, CURRENT_TIMESTAMP) "
-                    "ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username",
-                    (user_id, username)
+                    "INSERT INTO users (user_id, username, full_name, joined_at) VALUES (%s, %s, %s, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name",
+                    (user_id, username, full_name)
                 )
                 conn.commit()
         except Exception as e:
@@ -87,12 +90,11 @@ def save_user(user_id, username):
             conn.close()
 
 def track_app_open(user_id):
-    """মিনি অ্যাপ ওপেন হওয়ার লগ ডাটাবেসে জমা করে (২৪ ঘণ্টা পর পর কাউন্ট হবে)"""
+    """মিনি অ্যাপ ওপেন হওয়ার লগ ডাটাবেসে জমা করে (২৪ ঘণ্টা পর পর ইউনিক কাউন্ট)"""
     conn = get_db_connection()
     if conn:
         try:
             with conn.cursor() as cur:
-                # ইউজারের শেষ ওপেন করার সময় চেক করা
                 cur.execute("SELECT MAX(last_open) FROM app_logs WHERE user_id = %s", (user_id,))
                 res = cur.fetchone()
                 
@@ -100,21 +102,15 @@ def track_app_open(user_id):
                 should_insert = False
                 
                 if res[0] is None:
-                    # যদি এই ইউজার আগে কখনো ওপেন না করে থাকে
                     should_insert = True
                 else:
                     last_open_time = res[0]
-                    # যদি শেষ ওপেন করার সময় থেকে এখন পর্যন্ত ২৪ ঘণ্টা বা তার বেশি সময় পার হয়
                     if now - last_open_time >= timedelta(hours=24):
                         should_insert = True
                 
                 if should_insert:
                     cur.execute("INSERT INTO app_logs (user_id, last_open) VALUES (%s, %s)", (user_id, now))
                     conn.commit()
-                    logger.info(f"App open counted for user {user_id}")
-                else:
-                    logger.info(f"App open ignored for user {user_id} (within 24h)")
-                    
         except Exception as e:
             logger.error(f"Error tracking app open: {e}")
         finally:
@@ -122,7 +118,7 @@ def track_app_open(user_id):
 
 async def post_init(application: Application):
     """বট মেনু কমান্ড সেটআপ"""
-    init_db() # ডাটাবেস চেক এবং টেবিল আপডেট
+    init_db() # বট চালু হওয়ার সময় ডাটাবেস অটো-আপডেট হবে
     user_commands = [BotCommand("start", "বট শুরু করুন")]
     await application.bot.set_my_commands(user_commands)
     
@@ -143,7 +139,8 @@ async def post_init(application: Application):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    save_user(user.id, user.username)
+    # ইউজার আইডি, ইউজারনেম এবং ফুল নেম (টেলিগ্রাম নাম) সেভ করা হচ্ছে
+    save_user(user.id, user.username, user.full_name)
     
     if context.args:
         file_code = context.args[0]
@@ -176,19 +173,19 @@ async def statics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         
     try:
         with conn.cursor() as cur:
-            # মোট ইউজার (লাইফ টাইম)
             cur.execute("SELECT COUNT(*) FROM users")
             total_users = cur.fetchone()[0]
             
             # আজকের নতুন ইউজার
-            cur.execute("SELECT COUNT(*) FROM users WHERE joined_at >= CURRENT_DATE")
-            today_users = cur.fetchone()[0]
+            try:
+                cur.execute("SELECT COUNT(*) FROM users WHERE joined_at >= CURRENT_DATE")
+                today_users = cur.fetchone()[0]
+            except: today_users = "N/A"
             
-            # মোট অ্যাপ ওপেন (লাইফ টাইম)
             cur.execute("SELECT COUNT(*) FROM app_logs")
             total_app_opens = cur.fetchone()[0]
             
-            # আজকের অ্যাপ ওপেন (শেষ ২৪ ঘণ্টায় যারা প্রথমবার ঢুকেছে)
+            # গত ২৪ ঘণ্টায় ইউনিক অ্যাপ ওপেন
             cur.execute("SELECT COUNT(*) FROM app_logs WHERE last_open >= (NOW() - INTERVAL '24 HOURS')")
             today_app_opens = cur.fetchone()[0]
             
@@ -290,7 +287,7 @@ def home(): return "Bot is Online"
 
 @app.route('/webapp-open/<int:user_id>')
 def webapp_open(user_id):
-    """এই লিঙ্কে হিট করলে ২৪ ঘণ্টা পর পর মিনি অ্যাপ ওপেন কাউন্ট হবে"""
+    """২৪ ঘণ্টা পর পর মিনি অ্যাপ ওপেন কাউন্ট হবে"""
     track_app_open(user_id)
     return {"status": "success", "user_id": user_id}
 

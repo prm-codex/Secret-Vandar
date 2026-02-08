@@ -161,10 +161,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     except: continue
         finally: conn.close()
     else:
-        await update.message.reply_text(f"স্বাগতম {user.first_name} 😎 এই বটে আপনি নিয়মিত নতুন লিংকের আপডেট পাবেন। বটের সাথেই থাকুন এবং সকল সেলিব্রিটির লিংক এবং ভাইরাল ভিডিও গুলো ইনজয় করুন।")
+        await update.message.reply_text(f"স্বাগতম {user.first_name}😎 এই বটে আপনি নিয়মিত নতুন লিংকের আপডেট পাবেন। বটের সাথেই থাকুন এবং সকল সেলিব্রিটির লিংক এবং ভাইরাল ভিডিও গুলো ইনজয় করুন।")
 
 async def statics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """সুন্দর ও রেসপন্সিভ পরিসংখ্যান টেমপ্লেট"""
     if update.effective_user.id != ADMIN_USER_ID: return
     conn = get_db_connection()
     if not conn: return
@@ -198,7 +197,7 @@ async def statics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await update.message.reply_text(stats_msg, parse_mode='Markdown')
     finally: conn.close()
 
-# --- উন্নত ব্রডকাস্ট লজিক ---
+# --- ব্রডকাস্ট লজিক ---
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.effective_user.id != ADMIN_USER_ID: return ConversationHandler.END
@@ -228,7 +227,6 @@ async def send_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     protect_content=True
                 )
                 success += 1
-                # প্রতি ১০ জন পাঠানোর পর প্রগ্রেস আপডেট
                 if index % 10 == 0:
                     await progress_msg.edit_text(f"⏳ ব্রডকাস্টিং চলছে... ({index}/{total})")
                 await asyncio.sleep(0.05)
@@ -257,7 +255,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     bot_info = await context.bot.get_me()
     await query.message.reply_text(f"🔗 লিঙ্ক: `https://t.me/{bot_info.username}?start={query.data}`", parse_mode='Markdown')
 
-# --- মাল্টিপল ফাইল কালেকশন ---
+# --- মাল্টিপল ফাইল কালেকশন (লিঙ্ক জেনারেটর) ---
 
 async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.effective_user.id != ADMIN_USER_ID: return ConversationHandler.END
@@ -332,7 +330,16 @@ def main():
     threading.Thread(target=run_flask).start()
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     
-    # অ্যাডমিন কন্টেন্ট জেনারেটর
+    # ব্রডকাস্ট কনভারসেশন (আগে রাখা হয়েছে যাতে প্রায়োরিটি পায়)
+    application.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("broadcast", broadcast_command)],
+        states={
+            GET_BROADCAST_MSG: [MessageHandler(filters.ALL & ~filters.COMMAND, send_broadcast)]
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    ))
+
+    # অ্যাডমিন কন্টেন্ট জেনারেটর (লিঙ্ক তৈরি)
     application.add_handler(ConversationHandler(
         entry_points=[MessageHandler(filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.PHOTO | (filters.TEXT & ~filters.COMMAND), handle_admin_input)],
         states={
@@ -342,15 +349,6 @@ def main():
             ],
             GET_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_title)],
             GET_CUSTOM_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_custom_code)]
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    ))
-    
-    # ব্রডকাস্ট কনভারসেশন
-    application.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("broadcast", broadcast_command)],
-        states={
-            GET_BROADCAST_MSG: [MessageHandler(filters.ALL & ~filters.COMMAND, send_broadcast)]
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     ))

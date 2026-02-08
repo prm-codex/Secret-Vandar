@@ -53,11 +53,20 @@ def init_db():
     if conn:
         try:
             with conn.cursor() as cur:
-                # ইউজার টেবিলে joined_at এবং full_name কলাম না থাকলে অটোমেটিক অ্যাড করবে
+                # ১. প্রথমে users টেবিল নিশ্চিত করা
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        user_id BIGINT PRIMARY KEY,
+                        username TEXT,
+                        full_name TEXT,
+                        joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                # ২. কলামগুলো না থাকলে যোগ করা
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT")
                 
-                # মিনি অ্যাপ ওপেন ট্র্যাকিং এর জন্য টেবিল তৈরি (যদি না থাকে)
+                # ৩. মিনি অ্যাপ ওপেন ট্র্যাকিং এর জন্য টেবিল তৈরি (যদি না থাকে)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS app_logs (
                         user_id BIGINT,
@@ -77,7 +86,6 @@ def save_user(user_id, username, full_name):
     if conn:
         try:
             with conn.cursor() as cur:
-                # ইউজার আইডি ইউনিক হিসেবে সেভ হবে এবং ইউজারনেম ও নাম আপডেট হবে
                 cur.execute(
                     "INSERT INTO users (user_id, username, full_name, joined_at) VALUES (%s, %s, %s, CURRENT_TIMESTAMP) "
                     "ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name",
@@ -90,7 +98,7 @@ def save_user(user_id, username, full_name):
             conn.close()
 
 def track_app_open(user_id):
-    """মিনি অ্যাপ ওপেন হওয়ার লগ ডাটাবেসে জমা করে (২৪ ঘণ্টা পর পর ইউনিক কাউন্ট)"""
+    """মিনি অ্যাপ ওপেন ট্র্যাকিং (২৪ ঘণ্টা ইউনিক লজিক)"""
     conn = get_db_connection()
     if conn:
         try:
@@ -118,7 +126,7 @@ def track_app_open(user_id):
 
 async def post_init(application: Application):
     """বট মেনু কমান্ড সেটআপ"""
-    init_db() # বট চালু হওয়ার সময় ডাটাবেস অটো-আপডেট হবে
+    init_db()
     user_commands = [BotCommand("start", "বট শুরু করুন")]
     await application.bot.set_my_commands(user_commands)
     
@@ -139,7 +147,6 @@ async def post_init(application: Application):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    # ইউজার আইডি, ইউজারনেম এবং ফুল নেম (টেলিগ্রাম নাম) সেভ করা হচ্ছে
     save_user(user.id, user.username, user.full_name)
     
     if context.args:
@@ -164,24 +171,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def statics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """বটের বিস্তারিত পরিসংখ্যান দেখায়"""
-    if update.effective_user.id != ADMIN_USER_ID: return
+    if update.effective_user.id != ADMIN_USER_ID:
+        logger.warning(f"Unauthorized access attempt to /statics by {update.effective_user.id}")
+        return
     
     conn = get_db_connection()
     if not conn:
-        await update.message.reply_text("ডেটাবেস এরর!")
+        await update.message.reply_text("❌ ডাটাবেস কানেকশন এরর!")
         return
         
     try:
         with conn.cursor() as cur:
+            # মোট ইউজার
             cur.execute("SELECT COUNT(*) FROM users")
             total_users = cur.fetchone()[0]
             
             # আজকের নতুন ইউজার
-            try:
-                cur.execute("SELECT COUNT(*) FROM users WHERE joined_at >= CURRENT_DATE")
-                today_users = cur.fetchone()[0]
-            except: today_users = "N/A"
+            cur.execute("SELECT COUNT(*) FROM users WHERE joined_at >= CURRENT_DATE")
+            today_users = cur.fetchone()[0]
             
+            # মোট অ্যাপ ওপেন
             cur.execute("SELECT COUNT(*) FROM app_logs")
             total_app_opens = cur.fetchone()[0]
             
@@ -189,17 +198,20 @@ async def statics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             cur.execute("SELECT COUNT(*) FROM app_logs WHERE last_open >= (NOW() - INTERVAL '24 HOURS')")
             today_app_opens = cur.fetchone()[0]
             
-        stats_msg = (
-            "📊 **বট পরিসংখ্যান**\n\n"
-            f"👥 **ইউজার পরিসংখ্যান:**\n"
-            f"  • আজকে নতুন: {today_users}\n"
-            f"  • মোট ইউজার: {total_users}\n\n"
-            f"📱 **মিনি অ্যাপ পরিসংখ্যান (ইউনিক):**\n"
-            f"  • গত ২৪ ঘণ্টায়: {today_app_opens}\n"
-            f"  • মোট ওপেন (লাইফটাইম): {total_app_opens}\n\n"
-            f"📅 তারিখ: {datetime.now().strftime('%d %B, %Y')}"
-        )
-        await update.message.reply_text(stats_msg, parse_mode='Markdown')
+            stats_msg = (
+                "📊 **বট পরিসংখ্যান**\n\n"
+                f"👥 **ইউজার পরিসংখ্যান:**\n"
+                f"  • আজকে নতুন: {today_users}\n"
+                f"  • মোট ইউজার: {total_users}\n\n"
+                f"📱 **মিনি অ্যাপ পরিসংখ্যান (ইউনিক):**\n"
+                f"  • গত ২৪ ঘণ্টায়: {today_app_opens}\n"
+                f"  • মোট ওপেন (লাইফটাইম): {total_app_opens}\n\n"
+                f"📅 তারিখ: {datetime.now().strftime('%d %B, %Y')}"
+            )
+            await update.message.reply_text(stats_msg, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Statics Command Error: {e}")
+        await update.message.reply_text(f"❌ একটি সমস্যা হয়েছে: {str(e)}")
     finally:
         conn.close()
 
@@ -219,7 +231,7 @@ async def send_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         for (u_id,) in users:
             try: await context.bot.copy_message(chat_id=u_id, from_chat_id=admin_msg.chat_id, message_id=admin_msg.message_id, protect_content=True)
             except: continue
-        await update.message.reply_text("ব্রডকাস্ট সম্পন্ন।")
+        await update.message.reply_text("✅ ব্রডকাস্ট সম্পন্ন।")
     finally: conn.close()
     return ConversationHandler.END
 
@@ -233,7 +245,7 @@ async def all_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             results = cur.fetchall()
         if results:
             keyboard = [[InlineKeyboardButton(t or c, callback_data=c)] for c, t in results]
-            await update.message.reply_text('ফাইলের তালিকা:', reply_markup=InlineKeyboardMarkup(keyboard))
+            await update.message.reply_text('📂 ফাইলের তালিকা:', reply_markup=InlineKeyboardMarkup(keyboard))
     finally: conn.close()
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -252,13 +264,13 @@ async def handle_media_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif msg.photo: f_id, f_type = msg.photo[-1].file_id, 'photo'
     if f_id:
         context.user_data['tmp_file'] = {'id': f_id, 'type': f_type}
-        await msg.reply_text("শিরোনাম (Title) দিন।")
+        await msg.reply_text("✍️ শিরোনাম (Title) দিন।")
         return GET_TITLE
     return ConversationHandler.END
 
 async def get_title(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data['tmp_title'] = update.message.text.strip()
-    await update.message.reply_text("ইউনিক কোড দিন।")
+    await update.message.reply_text("🔑 ইউনিক কোড দিন (স্পেস ছাড়া)।")
     return GET_CUSTOM_CODE
 
 async def get_custom_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -272,12 +284,12 @@ async def get_custom_code(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             cur.execute("INSERT INTO files (custom_code, title, file_type, file_id) VALUES (%s, %s, %s, %s)", (code, t, f['type'], f['id']))
             conn.commit()
             bot_info = await context.bot.get_me()
-            await update.message.reply_text(f"সফল! লিঙ্ক:\n`https://t.me/{bot_info.username}?start={code}`", parse_mode='Markdown')
+            await update.message.reply_text(f"✅ সফল! লিঙ্ক:\n`https://t.me/{bot_info.username}?start={code}`", parse_mode='Markdown')
     finally: conn.close()
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("বাতিল করা হয়েছে।")
+    await update.message.reply_text("❌ বাতিল করা হয়েছে।")
     return ConversationHandler.END
 
 # --- Flask Server ---

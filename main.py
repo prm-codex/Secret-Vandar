@@ -48,12 +48,12 @@ ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", 0))
 GET_TITLE, GET_CUSTOM_CODE, GET_BROADCAST_MSG = range(3)
 
 def init_db():
-    """প্রয়োজনীয় টেবিল এবং কলাম তৈরি বা অটো-আপডেট করে"""
+    """প্রয়োজনীয় টেবিল এবং কলাম তৈরি বা অটো-আপডেট করে (স্কিমা ফিক্সসহ)"""
     conn = get_db_connection()
     if conn:
         try:
             with conn.cursor() as cur:
-                # ১. প্রথমে users টেবিল নিশ্চিত করা
+                # ১. users টেবিল নিশ্চিত করা
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS users (
                         user_id BIGINT PRIMARY KEY,
@@ -62,19 +62,21 @@ def init_db():
                         joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
-                # ২. কলামগুলো না থাকলে যোগ করা
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT")
                 
-                # ৩. মিনি অ্যাপ ওপেন ট্র্যাকিং এর জন্য টেবিল তৈরি (যদি না থাকে)
+                # ২. app_logs টেবিল নিশ্চিত করা
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS app_logs (
                         user_id BIGINT,
                         last_open TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
+                # ৩. কলামটি না থাকলে নিশ্চিতভাবে যোগ করা (Fix for column not exist error)
+                cur.execute("ALTER TABLE app_logs ADD COLUMN IF NOT EXISTS last_open TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+                
                 conn.commit()
-                logger.info("Database initialized successfully.")
+                logger.info("Database initialized and schema updated successfully.")
         except Exception as e:
             logger.error(f"DB Init Error: {e}")
         finally:
@@ -126,7 +128,7 @@ def track_app_open(user_id):
 
 async def post_init(application: Application):
     """বট মেনু কমান্ড সেটআপ"""
-    init_db()
+    init_db() # ডাটাবেস স্কিমা ফিক্স করবে
     user_commands = [BotCommand("start", "বট শুরু করুন")]
     await application.bot.set_my_commands(user_commands)
     
@@ -171,9 +173,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def statics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """বটের বিস্তারিত পরিসংখ্যান দেখায়"""
-    if update.effective_user.id != ADMIN_USER_ID:
-        logger.warning(f"Unauthorized access attempt to /statics by {update.effective_user.id}")
-        return
+    if update.effective_user.id != ADMIN_USER_ID: return
     
     conn = get_db_connection()
     if not conn:
@@ -211,7 +211,7 @@ async def statics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await update.message.reply_text(stats_msg, parse_mode='Markdown')
     except Exception as e:
         logger.error(f"Statics Command Error: {e}")
-        await update.message.reply_text(f"❌ একটি সমস্যা হয়েছে: {str(e)}")
+        await update.message.reply_text(f"❌ ডাটাবেস কুয়েরিতে সমস্যা হয়েছে। দয়া করে বট রিস্টার্ট দিন যাতে টেবিল আপডেট হতে পারে।")
     finally:
         conn.close()
 

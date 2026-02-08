@@ -217,6 +217,7 @@ async def send_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         total = len(users)
         progress_msg = await update.message.reply_text(f"⏳ ব্রডকাস্টিং শুরু হয়েছে... (০/{total})")
         success = 0
+        failed = 0
         
         for index, (u_id,) in enumerate(users, 1):
             try:
@@ -227,12 +228,25 @@ async def send_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     protect_content=True
                 )
                 success += 1
-                if index % 10 == 0:
-                    await progress_msg.edit_text(f"⏳ ব্রডকাস্টিং চলছে... ({index}/{total})")
-                await asyncio.sleep(0.05)
-            except: continue
+            except Exception as e:
+                logger.warning(f"Failed to send broadcast to {u_id}: {e}")
+                failed += 1
             
-        await progress_msg.edit_text(f"✅ **ব্রডকাস্ট সম্পন্ন!**\n\n📊 ফলাফল:\n├ মোট ইউজার: `{total}`\n└ সফলভাবে পাঠানো হয়েছে: `{success}` জন।", parse_mode='Markdown')
+            # প্রতি ১০ জন পাঠানোর পর প্রগ্রেস আপডেট
+            if index % 10 == 0:
+                await progress_msg.edit_text(f"⏳ ব্রডকাস্টিং চলছে... ({index}/{total})")
+            
+            # টেলিগ্রাম লিমিট এড়াতে অল্প গ্যাপ
+            await asyncio.sleep(0.05)
+            
+        await progress_msg.edit_text(
+            f"✅ **ব্রডকাস্ট সম্পন্ন!**\n\n"
+            f"📊 ফলাফল:\n"
+            f"├ মোট ইউজার: `{total}`\n"
+            f"├ সফল: `{success}`\n"
+            f"└ ব্যর্থ: `{failed}` (ইউজার বট ব্লক করেছে)", 
+            parse_mode='Markdown'
+        )
     finally: conn.close()
     return ConversationHandler.END
 
@@ -330,7 +344,7 @@ def main():
     threading.Thread(target=run_flask).start()
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     
-    # ব্রডকাস্ট কনভারসেশন (আগে রাখা হয়েছে যাতে প্রায়োরিটি পায়)
+    # ব্রডকাস্ট কনভারসেশন
     application.add_handler(ConversationHandler(
         entry_points=[CommandHandler("broadcast", broadcast_command)],
         states={

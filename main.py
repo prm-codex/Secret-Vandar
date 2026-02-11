@@ -84,7 +84,7 @@ def init_db():
                     )
                 """)
 
-                # সেটিংস টেবিল
+                # সেটিংস টেবিল (বাটন নাম সেভ করার জন্য)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS settings (
                         key TEXT PRIMARY KEY,
@@ -154,7 +154,7 @@ async def post_init(application: Application):
             BotCommand("alllink", "সব ফাইলের তালিকা"),
             BotCommand("broadcast", "ব্রডকাস্ট"),
             BotCommand("statics", "পরিসংখ্যান"),
-            BotCommand("setbtn", "চ্যানেল বাটন নাম সেট"),
+            BotCommand("setbtn", "বাটন নাম সেট করুন"),
             BotCommand("cancel", "বাতিল")
         ]
         try:
@@ -165,7 +165,8 @@ async def post_init(application: Application):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    save_user(user.id, user.username, user.full_name)
+    if user:
+        save_user(user.id, user.username, user.full_name)
     
     if context.args:
         file_code = context.args[0]
@@ -294,13 +295,14 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     bot_info = await context.bot.get_me()
     await query.message.reply_text(f"🔗 লিঙ্ক: `https://t.me/{bot_info.username}?start={query.data}`", parse_mode='Markdown')
 
-# --- চ্যানেল পোস্ট অটো-বাটন হ্যান্ডলার ---
+# --- চ্যানেল পোস্ট অটো-বাটন হ্যান্ডলার (FIXED) ---
 async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """চ্যানেলে পোস্ট হলে বাটন যোগ করে"""
     post = update.channel_post
     if post:
         btn_text = get_setting("channel_btn_name", "Open Mini App 🔐")
-        button = InlineKeyboardButton(text=btn_text, web_app=WebAppInfo(url=MINI_APP_URL))
+        # চ্যানেলে web_app টাইপ বাটন দেওয়া যায় না, তাই সরাসরি URL বাটন দেওয়া হলো
+        button = InlineKeyboardButton(text=btn_text, url=MINI_APP_URL)
         keyboard = InlineKeyboardMarkup([[button]])
         try:
             await context.bot.edit_message_reply_markup(
@@ -384,7 +386,7 @@ def main():
     threading.Thread(target=run_flask).start()
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     
-    # প্রথমে কমান্ড হ্যান্ডলারগুলো যুক্ত করা হয়েছে যাতে কনভারসেশন হ্যান্ডলারের সাথে কনফ্লিক্ট না হয়
+    # প্রথমে কমান্ড হ্যান্ডলারগুলো যুক্ত করা হয়েছে
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("alllink", all_links))
     application.add_handler(CommandHandler("statics", statics_command))
@@ -400,7 +402,7 @@ def main():
 
     # লিঙ্ক জেনারেটর কনভারসেশন
     application.add_handler(ConversationHandler(
-        entry_points=[MessageHandler((filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.PHOTO | filters.TEXT) & ~filters.COMMAND, handle_admin_input)],
+        entry_points=[MessageHandler((filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.PHOTO | filters.TEXT) & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_admin_input)],
         states={
             GET_MEDIA: [
                 MessageHandler((filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.PHOTO | filters.TEXT) & ~filters.COMMAND, add_to_media_list),
@@ -412,8 +414,8 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel)],
     ))
     
-    # চ্যানেলের পোস্টগুলো ধরার জন্য সঠিক ফিল্টার
-    application.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POSTS, channel_post_handler))
+    # চ্যানেলের পোস্টগুলো ধরার জন্য ফিল্টার
+    application.add_handler(MessageHandler(filters.ChatType.CHANNEL, channel_post_handler))
     
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     

@@ -26,8 +26,6 @@ logger = logging.getLogger(__name__)
 DATABASE_URL = os.getenv("DATABASE_URL")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", 0))
-# আপনার মিনি অ্যাপের লিঙ্ক
-MINI_APP_URL = "https://secret-vandar.blogspot.com/"
 
 def get_db_connection():
     """ডেটাবেস কানেকশন স্থাপন করে"""
@@ -46,6 +44,7 @@ def get_db_connection():
 
 # কথোপকথনের ধাপ (States)
 GET_MEDIA, GET_TITLE, GET_CUSTOM_CODE, GET_BROADCAST_MSG = range(4)
+SET_BTN_NAME, SET_BTN_URL = range(4, 6) # নতুন স্টেট
 
 def init_db():
     """প্রয়োজনীয় টেবিল এবং কলাম তৈরি বা অটো-আপডেট করে"""
@@ -84,7 +83,7 @@ def init_db():
                     )
                 """)
 
-                # সেটিংস টেবিল (বাটন নাম সেভ করার জন্য)
+                # সেটিংস টেবিল
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS settings (
                         key TEXT PRIMARY KEY,
@@ -154,7 +153,8 @@ async def post_init(application: Application):
             BotCommand("alllink", "সব ফাইলের তালিকা"),
             BotCommand("broadcast", "ব্রডকাস্ট"),
             BotCommand("statics", "পরিসংখ্যান"),
-            BotCommand("setbtn", "বাটন নাম সেট করুন"),
+            BotCommand("setbtn", "বাটনের নাম পরিবর্তন"),
+            BotCommand("seturl", "বাটনের লিঙ্ক পরিবর্তন"),
             BotCommand("cancel", "বাতিল")
         ]
         try:
@@ -196,17 +196,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         await update.message.reply_text(f"স্বাগতম {user.first_name}😎 এই বটে আপনি নিয়মিত নতুন লিংকের আপডেট পাবেন।")
 
-async def set_btn_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """বাটনের নাম সেট করার কমান্ড"""
-    if update.effective_user.id != ADMIN_USER_ID: return
-    
-    if not context.args:
-        await update.message.reply_text("❌ ব্যবহারবিধি: `/setbtn আপনার বাটনের নাম`", parse_mode='Markdown')
-        return
-    
-    new_name = " ".join(context.args)
+# --- সেটিং পরিবর্তন কনভারসেশন ---
+
+async def set_btn_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.effective_user.id != ADMIN_USER_ID: return ConversationHandler.END
+    await update.message.reply_text("✍️ চ্যানেলের পোস্টের নিচে থাকা বাটনের জন্য একটি **নাম** দিন:")
+    return SET_BTN_NAME
+
+async def save_btn_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    new_name = update.message.text.strip()
     set_setting("channel_btn_name", new_name)
-    await update.message.reply_text(f"✅ চ্যানেলের জন্য নতুন বাটনের নাম সেট হয়েছে: **{new_name}**", parse_mode='Markdown')
+    await update.message.reply_text(f"✅ বাটনের নাম সেট হয়েছে: **{new_name}**")
+    return ConversationHandler.END
+
+async def set_url_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.effective_user.id != ADMIN_USER_ID: return ConversationHandler.END
+    await update.message.reply_text("🔗 বাটনের জন্য নতুন **URL/লিঙ্ক** দিন:")
+    return SET_BTN_URL
+
+async def save_btn_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    new_url = update.message.text.strip()
+    if not new_url.startswith("http"):
+        await update.message.reply_text("❌ দয়া করে একটি সঠিক লিঙ্ক দিন (যেমন: https://...)")
+        return SET_BTN_URL
+    set_setting("channel_btn_url", new_url)
+    await update.message.reply_text(f"✅ বাটনের লিঙ্ক সেট হয়েছে: **{new_url}**")
+    return ConversationHandler.END
 
 async def statics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ADMIN_USER_ID: return
@@ -295,14 +310,15 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     bot_info = await context.bot.get_me()
     await query.message.reply_text(f"🔗 লিঙ্ক: `https://t.me/{bot_info.username}?start={query.data}`", parse_mode='Markdown')
 
-# --- চ্যানেল পোস্ট অটো-বাটন হ্যান্ডলার (FIXED) ---
+# --- চ্যানেল পোস্ট অটো-বাটন হ্যান্ডলার ---
 async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """চ্যানেলে পোস্ট হলে বাটন যোগ করে"""
     post = update.channel_post
     if post:
         btn_text = get_setting("channel_btn_name", "Open Mini App 🔐")
-        # চ্যানেলে web_app টাইপ বাটন দেওয়া যায় না, তাই সরাসরি URL বাটন দেওয়া হলো
-        button = InlineKeyboardButton(text=btn_text, url=MINI_APP_URL)
+        # ডিফল্ট লিঙ্ক হিসেবে একটি ব্লগার সাইট দেওয়া আছে, যা /seturl দিয়ে পরিবর্তন করা যাবে
+        btn_url = get_setting("channel_btn_url", "https://secret-vandar.blogspot.com/")
+        
+        button = InlineKeyboardButton(text=btn_text, url=btn_url)
         keyboard = InlineKeyboardMarkup([[button]])
         try:
             await context.bot.edit_message_reply_markup(
@@ -366,7 +382,7 @@ async def get_custom_code(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("❌ বাতিল।")
+    await update.message.reply_text("❌ বাতিল করা হয়েছে।")
     return ConversationHandler.END
 
 # --- Flask Server ---
@@ -386,12 +402,25 @@ def main():
     threading.Thread(target=run_flask).start()
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     
-    # প্রথমে কমান্ড হ্যান্ডলারগুলো যুক্ত করা হয়েছে
+    # কমান্ড হ্যান্ডলার
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("alllink", all_links))
     application.add_handler(CommandHandler("statics", statics_command))
-    application.add_handler(CommandHandler("setbtn", set_btn_name))
     application.add_handler(CommandHandler("cancel", cancel))
+    
+    # বাটন নাম সেট করার কনভারসেশন
+    application.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("setbtn", set_btn_start)],
+        states={SET_BTN_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_btn_name)]},
+        fallbacks=[CommandHandler("cancel", cancel)]
+    ))
+
+    # বাটন লিঙ্ক সেট করার কনভারসেশন
+    application.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("seturl", set_url_start)],
+        states={SET_BTN_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_btn_url)]},
+        fallbacks=[CommandHandler("cancel", cancel)]
+    ))
     
     # ব্রডকাস্ট কনভারসেশন
     application.add_handler(ConversationHandler(

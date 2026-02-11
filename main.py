@@ -84,7 +84,7 @@ def init_db():
                     )
                 """)
 
-                # সেটিংস টেবিল (বাটন নাম সেভ করার জন্য)
+                # সেটিংস টেবিল
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS settings (
                         key TEXT PRIMARY KEY,
@@ -155,7 +155,7 @@ async def post_init(application: Application):
             BotCommand("broadcast", "ব্রডকাস্ট"),
             BotCommand("statics", "পরিসংখ্যান"),
             BotCommand("setbtn", "চ্যানেল বাটন নাম সেট"),
-            BotCommand("cancel", "বর্তমান কাজ বাতিল")
+            BotCommand("cancel", "বাতিল")
         ]
         try:
             await application.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_USER_ID))
@@ -198,8 +198,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def set_btn_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """বাটনের নাম সেট করার কমান্ড"""
     if update.effective_user.id != ADMIN_USER_ID: return
+    
     if not context.args:
-        await update.message.reply_text("ব্যবহারবিধি: `/setbtn আপনার বাটনের নাম`", parse_mode='Markdown')
+        await update.message.reply_text("❌ ব্যবহারবিধি: `/setbtn আপনার বাটনের নাম`", parse_mode='Markdown')
         return
     
     new_name = " ".join(context.args)
@@ -295,13 +296,20 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
 # --- চ্যানেল পোস্ট অটো-বাটন হ্যান্ডলার ---
 async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.channel_post:
+    """চ্যানেলে পোস্ট হলে বাটন যোগ করে"""
+    post = update.channel_post
+    if post:
         btn_text = get_setting("channel_btn_name", "Open Mini App 🔐")
         button = InlineKeyboardButton(text=btn_text, web_app=WebAppInfo(url=MINI_APP_URL))
         keyboard = InlineKeyboardMarkup([[button]])
         try:
-            await update.channel_post.edit_reply_markup(reply_markup=keyboard)
-        except Exception as e: logger.error(f"Channel Edit Error: {e}")
+            await context.bot.edit_message_reply_markup(
+                chat_id=post.chat_id,
+                message_id=post.message_id,
+                reply_markup=keyboard
+            )
+        except Exception as e:
+            logger.error(f"Channel Edit Error: {e}")
 
 # --- লিঙ্ক জেনারেটর ---
 
@@ -376,17 +384,26 @@ def main():
     threading.Thread(target=run_flask).start()
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     
+    # প্রথমে কমান্ড হ্যান্ডলারগুলো যুক্ত করা হয়েছে যাতে কনভারসেশন হ্যান্ডলারের সাথে কনফ্লিক্ট না হয়
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("alllink", all_links))
+    application.add_handler(CommandHandler("statics", statics_command))
+    application.add_handler(CommandHandler("setbtn", set_btn_name))
+    application.add_handler(CommandHandler("cancel", cancel))
+    
+    # ব্রডকাস্ট কনভারসেশন
     application.add_handler(ConversationHandler(
         entry_points=[CommandHandler("broadcast", broadcast_command)],
         states={GET_BROADCAST_MSG: [MessageHandler(filters.ALL & ~filters.COMMAND, send_broadcast)]},
         fallbacks=[CommandHandler("cancel", cancel)],
     ))
 
+    # লিঙ্ক জেনারেটর কনভারসেশন
     application.add_handler(ConversationHandler(
-        entry_points=[MessageHandler(filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.PHOTO | (filters.TEXT & ~filters.COMMAND), handle_admin_input)],
+        entry_points=[MessageHandler((filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.PHOTO | filters.TEXT) & ~filters.COMMAND, handle_admin_input)],
         states={
             GET_MEDIA: [
-                MessageHandler(filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.PHOTO | (filters.TEXT & ~filters.COMMAND), add_to_media_list),
+                MessageHandler((filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.PHOTO | filters.TEXT) & ~filters.COMMAND, add_to_media_list),
                 CallbackQueryHandler(media_done_callback, pattern="^done_media$")
             ],
             GET_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_title)],
@@ -395,11 +412,9 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel)],
     ))
     
-    application.add_handler(MessageHandler(filters.ChatType.CHANNEL, channel_post_handler))
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("alllink", all_links))
-    application.add_handler(CommandHandler("statics", statics_command))
-    application.add_handler(CommandHandler("setbtn", set_btn_name))
+    # চ্যানেলের পোস্টগুলো ধরার জন্য সঠিক ফিল্টার
+    application.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POSTS, channel_post_handler))
+    
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     
     application.run_polling()

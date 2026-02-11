@@ -169,6 +169,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     if context.args:
         file_code = context.args[0]
+        
+        # সাধারণ ফাইল লিঙ্ক হ্যান্ডলিং
         conn = get_db_connection()
         if not conn: return
         try:
@@ -199,7 +201,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def set_btn_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.effective_user.id != ADMIN_USER_ID: return ConversationHandler.END
-    await update.message.reply_text("✍️ চ্যানেলের পোস্টের নিচে থাকা বাটনের জন্য একটি **নাম** দিন (যেমন: Join VIP):")
+    await update.message.reply_text("✍️ চ্যানেলের পোস্টের নিচে থাকা বাটনের জন্য একটি **নাম** দিন:")
     return SET_BTN_NAME
 
 async def save_btn_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -210,16 +212,21 @@ async def save_btn_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 async def set_url_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.effective_user.id != ADMIN_USER_ID: return ConversationHandler.END
-    await update.message.reply_text("🔗 বাটনের জন্য নতুন **URL/লিঙ্ক** দিন (যেমন: https://google.com):")
+    await update.message.reply_text(
+        "🔗 বাটনের জন্য নতুন **URL/লিঙ্ক** দিন।\n\n"
+        "💡 যদি চান বাটনটি ক্লিক করলে সরাসরি আপনার **Mini App** ওপেন হোক, তবে শুধু লিখুন: `bot`"
+    )
     return SET_BTN_URL
 
 async def save_btn_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    new_url = update.message.text.strip()
-    if not new_url.startswith("http"):
-        await update.message.reply_text("❌ দয়া করে একটি সঠিক লিঙ্ক দিন (অবশ্যই https:// দিয়ে শুরু হতে হবে)")
+    new_url = update.message.text.strip().lower()
+    if new_url != "bot" and not new_url.startswith("http"):
+        await update.message.reply_text("❌ সঠিক লিঙ্ক দিন অথবা `bot` লিখুন।")
         return SET_BTN_URL
+    
     set_setting("channel_btn_url", new_url)
-    await update.message.reply_text(f"✅ বাটনের লিঙ্ক সেট হয়েছে: **{new_url}**")
+    display_text = "Automatic Mini App Mode" if new_url == "bot" else new_url
+    await update.message.reply_text(f"✅ বাটনের লিঙ্ক সেট হয়েছে: **{display_text}**")
     return ConversationHandler.END
 
 async def statics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -314,9 +321,16 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     post = update.channel_post
     if post:
         btn_text = get_setting("channel_btn_name", "Open Mini App 🔐")
-        btn_url = get_setting("channel_btn_url", "https://secret-vandar.blogspot.com/")
+        btn_url_config = get_setting("channel_btn_url", "bot")
         
-        button = InlineKeyboardButton(text=btn_text, url=btn_url)
+        if btn_url_config == "bot":
+            # অটোমেটিক মিনি অ্যাপ ওপেন করার লিঙ্ক
+            bot_info = await context.bot.get_me()
+            final_url = f"https://t.me/{bot_info.username}?startapp"
+        else:
+            final_url = btn_url_config
+            
+        button = InlineKeyboardButton(text=btn_text, url=final_url)
         keyboard = InlineKeyboardMarkup([[button]])
         try:
             await context.bot.edit_message_reply_markup(
@@ -380,7 +394,7 @@ async def get_custom_code(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("❌ বাতিল করা হয়েছে।")
+    await update.message.reply_text("❌ বাতিল।")
     return ConversationHandler.END
 
 # --- Flask Server ---

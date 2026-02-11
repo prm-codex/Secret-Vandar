@@ -43,8 +43,7 @@ def get_db_connection():
         return None
 
 # কথোপকথনের ধাপ (States)
-GET_MEDIA, GET_TITLE, GET_CUSTOM_CODE, GET_BROADCAST_MSG = range(4)
-SET_BTN_NAME, SET_BTN_URL = range(4, 6) # নতুন স্টেট
+GET_MEDIA, GET_TITLE, GET_CUSTOM_CODE, GET_BROADCAST_MSG, SET_BTN_NAME, SET_BTN_URL = range(6)
 
 def init_db():
     """প্রয়োজনীয় টেবিল এবং কলাম তৈরি বা অটো-আপডেট করে"""
@@ -200,7 +199,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def set_btn_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.effective_user.id != ADMIN_USER_ID: return ConversationHandler.END
-    await update.message.reply_text("✍️ চ্যানেলের পোস্টের নিচে থাকা বাটনের জন্য একটি **নাম** দিন:")
+    await update.message.reply_text("✍️ চ্যানেলের পোস্টের নিচে থাকা বাটনের জন্য একটি **নাম** দিন (যেমন: Join VIP):")
     return SET_BTN_NAME
 
 async def save_btn_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -211,13 +210,13 @@ async def save_btn_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 async def set_url_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.effective_user.id != ADMIN_USER_ID: return ConversationHandler.END
-    await update.message.reply_text("🔗 বাটনের জন্য নতুন **URL/লিঙ্ক** দিন:")
+    await update.message.reply_text("🔗 বাটনের জন্য নতুন **URL/লিঙ্ক** দিন (যেমন: https://google.com):")
     return SET_BTN_URL
 
 async def save_btn_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     new_url = update.message.text.strip()
     if not new_url.startswith("http"):
-        await update.message.reply_text("❌ দয়া করে একটি সঠিক লিঙ্ক দিন (যেমন: https://...)")
+        await update.message.reply_text("❌ দয়া করে একটি সঠিক লিঙ্ক দিন (অবশ্যই https:// দিয়ে শুরু হতে হবে)")
         return SET_BTN_URL
     set_setting("channel_btn_url", new_url)
     await update.message.reply_text(f"✅ বাটনের লিঙ্ক সেট হয়েছে: **{new_url}**")
@@ -315,7 +314,6 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     post = update.channel_post
     if post:
         btn_text = get_setting("channel_btn_name", "Open Mini App 🔐")
-        # ডিফল্ট লিঙ্ক হিসেবে একটি ব্লগার সাইট দেওয়া আছে, যা /seturl দিয়ে পরিবর্তন করা যাবে
         btn_url = get_setting("channel_btn_url", "https://secret-vandar.blogspot.com/")
         
         button = InlineKeyboardButton(text=btn_text, url=btn_url)

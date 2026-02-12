@@ -63,7 +63,7 @@ def init_db():
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT")
                 
-                # অ্যাপ লগ টেবিল
+                # অ্যাপ লগ টেবিল (ইউনিক ট্র্যাকিং)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS app_logs (
                         user_id BIGINT,
@@ -71,6 +71,14 @@ def init_db():
                     )
                 """)
                 cur.execute("ALTER TABLE app_logs ADD COLUMN IF NOT EXISTS last_open TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+
+                # অ্যাপ হিটস টেবিল (টোটাল ট্র্যাকিং - নতুন)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS app_hits (
+                        user_id BIGINT,
+                        hit_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
                 
                 # ফাইল টেবিল
                 cur.execute("""
@@ -109,16 +117,23 @@ def save_user(user_id, username, full_name):
         finally: conn.close()
 
 def track_app_open(user_id):
+    """মিনি অ্যাপ ওপেন ট্র্যাকিং লজিক (ইউনিক এবং টোটাল উভয়ই)"""
     conn = get_db_connection()
     if conn:
         try:
             with conn.cursor() as cur:
+                now = datetime.now()
+                
+                # ১. টোটাল ট্র্যাকিং: প্রতিটি ক্লিক সেভ হবে
+                cur.execute("INSERT INTO app_hits (user_id, hit_time) VALUES (%s, %s)", (user_id, now))
+
+                # ২. ইউনিক ট্র্যাকিং: ২৪ ঘণ্টা পর পর একবার সেভ হবে
                 cur.execute("SELECT MAX(last_open) FROM app_logs WHERE user_id = %s", (user_id,))
                 res = cur.fetchone()
-                now = datetime.now()
                 if res[0] is None or (now - res[0] >= timedelta(hours=24)):
                     cur.execute("INSERT INTO app_logs (user_id, last_open) VALUES (%s, %s)", (user_id, now))
-                    conn.commit()
+                
+                conn.commit()
         except Exception as e: logger.error(f"Track App Error: {e}")
         finally: conn.close()
 
@@ -169,8 +184,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     if context.args:
         file_code = context.args[0]
-        
-        # সাধারণ ফাইল লিঙ্ক হ্যান্ডলিং
         conn = get_db_connection()
         if not conn: return
         try:
@@ -180,10 +193,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if res:
                 f_types, f_ids, title = res
                 await context.bot.send_message(chat_id=user.id, text=f"*{title}*", parse_mode='Markdown')
-                
                 ids_list = f_ids.split('|')
                 types_list = f_types.split('|')
-                
                 for fid, ftype in zip(ids_list, types_list):
                     try:
                         if ftype == 'text': await context.bot.send_message(chat_id=user.id, text=fid, protect_content=True)
@@ -201,7 +212,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def set_btn_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.effective_user.id != ADMIN_USER_ID: return ConversationHandler.END
-    await update.message.reply_text("✍️ চ্যানেলের পোস্টের নিচে থাকা বাটনের জন্য একটি **নাম** দিন:")
+    await update.message.reply_text("✍️ চ্যানেলের বাটনের জন্য একটি **নাম** দিন:")
     return SET_BTN_NAME
 
 async def save_btn_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -212,10 +223,7 @@ async def save_btn_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 async def set_url_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.effective_user.id != ADMIN_USER_ID: return ConversationHandler.END
-    await update.message.reply_text(
-        "🔗 বাটনের জন্য নতুন **URL/লিঙ্ক** দিন।\n\n"
-        "💡 যদি চান বাটনটি ক্লিক করলে সরাসরি আপনার **Mini App** ওপেন হোক, তবে শুধু লিখুন: `bot`"
-    )
+    await update.message.reply_text("🔗 বাটনের জন্য নতুন **লিঙ্ক** দিন (অটো মিনি অ্যাপের জন্য লিখুন `bot`):")
     return SET_BTN_URL
 
 async def save_btn_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -223,10 +231,8 @@ async def save_btn_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     if new_url != "bot" and not new_url.startswith("http"):
         await update.message.reply_text("❌ সঠিক লিঙ্ক দিন অথবা `bot` লিখুন।")
         return SET_BTN_URL
-    
     set_setting("channel_btn_url", new_url)
-    display_text = "Automatic Mini App Mode" if new_url == "bot" else new_url
-    await update.message.reply_text(f"✅ বাটনের লিঙ্ক সেট হয়েছে: **{display_text}**")
+    await update.message.reply_text(f"✅ বাটনের লিঙ্ক সেট হয়েছে।")
     return ConversationHandler.END
 
 async def statics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -235,14 +241,25 @@ async def statics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not conn: return
     try:
         with conn.cursor() as cur:
+            # ইউজার রিপোর্ট
             cur.execute("SELECT COUNT(*) FROM users")
             total_users = cur.fetchone()[0]
             cur.execute("SELECT COUNT(*) FROM users WHERE joined_at >= CURRENT_DATE")
             today_users = cur.fetchone()[0]
+            
+            # অ্যাপ ইউনিক রিপোর্ট (২৪ ঘণ্টা ও লাইফটাইম)
             cur.execute("SELECT COUNT(*) FROM app_logs")
-            total_app_opens = cur.fetchone()[0]
+            lifetime_unique_opens = cur.fetchone()[0]
             cur.execute("SELECT COUNT(*) FROM app_logs WHERE last_open >= (NOW() - INTERVAL '24 HOURS')")
-            today_app_opens = cur.fetchone()[0]
+            today_unique_opens = cur.fetchone()[0]
+            
+            # অ্যাপ টোটাল রিপোর্ট (২৪ ঘণ্টা ও লাইফটাইম)
+            cur.execute("SELECT COUNT(*) FROM app_hits")
+            lifetime_total_opens = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM app_hits WHERE hit_time >= (NOW() - INTERVAL '24 HOURS')")
+            today_total_opens = cur.fetchone()[0]
+            
+            # লিঙ্ক রিপোর্ট
             cur.execute("SELECT COUNT(*) FROM files")
             total_links = cur.fetchone()[0]
             
@@ -253,8 +270,10 @@ async def statics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"├ আজকের নতুন: `{today_users}`\n"
                 f"└ মোট ইউজার: `{total_users}`\n\n"
                 f"📱 **মিনি অ্যাপ রিপোর্ট**\n"
-                f"├ গত ২৪ ঘণ্টায়: `{today_app_opens}`\n"
-                f"└ মোট ওপেন: `{total_app_opens}`\n\n"
+                f"├ গত ২৪ ঘণ্টায় (ইউনিক): `{today_unique_opens}`\n"
+                f"├ গত ২৪ ঘণ্টায় (টোটাল): `{today_total_opens}`\n"
+                f"├ মোট ওপেন (ইউনিক): `{lifetime_unique_opens}`\n"
+                f"└ মোট ওপেন (টোটাল): `{lifetime_total_opens}`\n\n"
                 f"🔗 **লিঙ্ক রিপোর্ট**\n"
                 f"└ মোট তৈরি লিঙ্ক: `{total_links}`\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
@@ -274,26 +293,21 @@ async def send_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     admin_msg = update.message
     conn = get_db_connection()
     if not conn: return ConversationHandler.END
-    
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT user_id FROM users")
             users = cur.fetchall()
-        
         total = len(users)
         progress_msg = await update.message.reply_text(f"⏳ ব্রডকাস্টিং শুরু... (০/{total})")
         success = 0
-        failed = 0
-        
         for index, (u_id,) in enumerate(users, 1):
             try:
                 await context.bot.copy_message(chat_id=u_id, from_chat_id=admin_msg.chat_id, message_id=admin_msg.message_id, protect_content=True)
                 success += 1
-            except: failed += 1
+            except: continue
             if index % 10 == 0: await progress_msg.edit_text(f"⏳ ব্রডকাস্টিং চলছে... ({index}/{total})")
             await asyncio.sleep(0.05)
-            
-        await progress_msg.edit_text(f"✅ **ব্রডকাস্ট সম্পন্ন!**\n\n├ মোট: `{total}`\n├ সফল: `{success}`\n└ ব্যর্থ: `{failed}`", parse_mode='Markdown')
+        await progress_msg.edit_text(f"✅ সম্পন্ন! সফল: `{success}`")
     finally: conn.close()
     return ConversationHandler.END
 
@@ -307,7 +321,7 @@ async def all_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             results = cur.fetchall()
         if results:
             keyboard = [[InlineKeyboardButton(t or c, callback_data=c)] for c, t in results]
-            await update.message.reply_text('📂 **সব লিঙ্কের তালিকা:**', reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+            await update.message.reply_text('📂 **সব লিঙ্ক:**', reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     finally: conn.close()
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -322,24 +336,16 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if post:
         btn_text = get_setting("channel_btn_name", "Open Mini App 🔐")
         btn_url_config = get_setting("channel_btn_url", "bot")
-        
         if btn_url_config == "bot":
-            # অটোমেটিক মিনি অ্যাপ ওপেন করার লিঙ্ক
             bot_info = await context.bot.get_me()
             final_url = f"https://t.me/{bot_info.username}?startapp"
         else:
             final_url = btn_url_config
-            
         button = InlineKeyboardButton(text=btn_text, url=final_url)
         keyboard = InlineKeyboardMarkup([[button]])
         try:
-            await context.bot.edit_message_reply_markup(
-                chat_id=post.chat_id,
-                message_id=post.message_id,
-                reply_markup=keyboard
-            )
-        except Exception as e:
-            logger.error(f"Channel Edit Error: {e}")
+            await context.bot.edit_message_reply_markup(chat_id=post.chat_id, message_id=post.message_id, reply_markup=keyboard)
+        except Exception as e: logger.error(f"Channel Edit Error: {e}")
 
 # --- লিঙ্ক জেনারেটর ---
 
@@ -356,12 +362,10 @@ async def add_to_media_list(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     elif msg.audio: f_id, f_type = msg.audio.file_id, 'audio'
     elif msg.photo: f_id, f_type = msg.photo[-1].file_id, 'photo'
     elif msg.text and not msg.text.startswith('/'): f_id, f_type = msg.text, 'text'
-    
     if f_id:
         context.user_data['multi_files'].append({'id': f_id, 'type': f_type})
-        count = len(context.user_data['multi_files'])
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Done ✅", callback_data="done_media")]])
-        await msg.reply_text(f"📦 কন্টেন্ট `{count}` যোগ হয়েছে।", reply_markup=keyboard)
+        await msg.reply_text(f"📦 কন্টেন্ট `{len(context.user_data['multi_files'])}` যোগ হয়েছে।", reply_markup=keyboard)
         return GET_MEDIA
     return GET_MEDIA
 
@@ -389,7 +393,7 @@ async def get_custom_code(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             cur.execute("INSERT INTO files (custom_code, title, file_type, file_id) VALUES (%s, %s, %s, %s)", (code, t, f_types, f_ids))
             conn.commit()
             bot_info = await context.bot.get_me()
-            await update.message.reply_text(f"✅ সফল! লিঙ্ক: `https://t.me/{bot_info.username}?start={code}`", parse_mode='Markdown')
+            await update.message.reply_text(f"✅ সফল! লিঙ্ক: `https://t.me/{bot_info.username}?start={code}`")
     finally: conn.close()
     return ConversationHandler.END
 
@@ -414,34 +418,27 @@ def main():
     threading.Thread(target=run_flask).start()
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     
-    # কমান্ড হ্যান্ডলার
+    # কমান্ড এবং কনভারসেশন হ্যান্ডলার
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("alllink", all_links))
     application.add_handler(CommandHandler("statics", statics_command))
     application.add_handler(CommandHandler("cancel", cancel))
     
-    # বাটন নাম সেট করার কনভারসেশন
     application.add_handler(ConversationHandler(
         entry_points=[CommandHandler("setbtn", set_btn_start)],
         states={SET_BTN_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_btn_name)]},
         fallbacks=[CommandHandler("cancel", cancel)]
     ))
-
-    # বাটন লিঙ্ক সেট করার কনভারসেশন
     application.add_handler(ConversationHandler(
         entry_points=[CommandHandler("seturl", set_url_start)],
         states={SET_BTN_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_btn_url)]},
         fallbacks=[CommandHandler("cancel", cancel)]
     ))
-    
-    # ব্রডকাস্ট কনভারসেশন
     application.add_handler(ConversationHandler(
         entry_points=[CommandHandler("broadcast", broadcast_command)],
         states={GET_BROADCAST_MSG: [MessageHandler(filters.ALL & ~filters.COMMAND, send_broadcast)]},
         fallbacks=[CommandHandler("cancel", cancel)],
     ))
-
-    # লিঙ্ক জেনারেটর কনভারসেশন
     application.add_handler(ConversationHandler(
         entry_points=[MessageHandler((filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.PHOTO | filters.TEXT) & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_admin_input)],
         states={
@@ -455,9 +452,7 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel)],
     ))
     
-    # চ্যানেলের পোস্টগুলো ধরার জন্য ফিল্টার
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL, channel_post_handler))
-    
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     
     application.run_polling()
